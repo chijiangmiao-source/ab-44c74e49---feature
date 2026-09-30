@@ -32,6 +32,8 @@ button:disabled{opacity:.5;cursor:default}
 .tag{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:700;white-space:nowrap}
 .tag.hit{background:rgba(46,160,67,.15);color:var(--hit);border:1px solid rgba(46,160,67,.45)}
 .tag.shadowed{background:rgba(214,69,69,.15);color:var(--shadow);border:1px solid rgba(214,69,69,.45)}
+.tag.feasible{background:rgba(46,160,67,.15);color:var(--hit);border:1px solid rgba(46,160,67,.45)}
+.tag.infeasible{background:rgba(214,133,69,.15);color:#f0b080;border:1px solid rgba(214,133,69,.45)}
 .chip{display:inline-block;background:#0d141d;border:1px solid var(--line);border-radius:6px;padding:1px 8px;margin:1px 3px 1px 0;font-family:ui-monospace,Consolas,monospace;font-size:12px}
 .mono{font-family:ui-monospace,Consolas,monospace}
 #error{background:rgba(214,69,69,.12);border:1px solid rgba(214,69,69,.5);color:#ffb4b4;white-space:pre-wrap;font-size:13px;line-height:1.6}
@@ -82,6 +84,40 @@ button:disabled{opacity:.5;cursor:default}
     <div class="note">结论一经提交即冻结：同一标识再次提交不同载荷会被拒绝（HTTP 409），不会改写既有结论。</div>
   </section>
 
+  <section id="reorderPanel" hidden>
+    <h2>3. 对审计 <span class="mono" id="reorderAuditLabel"></span> 发起稳定重排序（至多 12 条规则）</h2>
+    <div class="note" style="margin-bottom:10px">
+      仅重排该审计中<strong>既有规则</strong>：服务以五维精确区域维护已排规则并集，规则只在当前剩余区域非空、
+      且全部「必须早于它」的约束已满足时才能入序；不做 CIDR 重叠、端口抽样或贪心选择。多个可行顺序先按
+      逆序对数最少、再按规则标识序裁决。重排结论独立冻结，不影响审计原结论。
+    </div>
+    <div class="row">
+      <label class="field">重排序标识（稳定、可复查；同标识改换来源或约束将被拒绝）
+        <input id="reorderId" class="mono" placeholder="例如 reorder-2026-09-30-a" maxlength="64">
+      </label>
+    </div>
+    <table>
+      <thead><tr><th>#</th><th>规则 A（必须早于）</th><th></th><th>规则 B</th><th></th></tr></thead>
+      <tbody id="constraintRows"></tbody>
+    </table>
+    <div class="toolbar">
+      <button class="ghost" id="addConstraintBtn" type="button">＋ 添加优先约束</button>
+      <button id="submitReorderBtn" type="button">提交重排序</button>
+      <span class="note" id="constraintNote"></span>
+    </div>
+    <div class="note" id="reorderUnavailable" style="margin-top:8px" hidden></div>
+  </section>
+
+  <section>
+    <h2>4. 按重排序标识重新打开结论</h2>
+    <div class="row">
+      <label class="field">重排序标识
+        <input id="reorderLookupId" class="mono" placeholder="提交时使用的重排序标识" maxlength="64">
+      </label>
+      <button class="ghost" id="reorderLookupBtn" type="button">查询重排结论</button>
+    </div>
+  </section>
+
   <section id="error" hidden></section>
 
   <section id="result" hidden>
@@ -94,6 +130,13 @@ button:disabled{opacity:.5;cursor:default}
       </tr></thead>
       <tbody id="verdictRows"></tbody>
     </table>
+  </section>
+
+  <section id="reorderResult" hidden>
+    <h2>重排序结论 <span class="mono" id="reorderResultId"></span></h2>
+    <div class="note" id="reorderResultNote"></div>
+    <div id="reorderConstraintsView" style="margin:10px 0"></div>
+    <div id="reorderResultBody"></div>
   </section>
 </main>
 
@@ -169,6 +212,9 @@ function formatError(status, data) {
     if (Array.isArray(data.errors)) {
       msg += '\n' + data.errors.map(e => '- ' + (e.loc || []).join('.') + ': ' + e.msg).join('\n');
     }
+    if (data.detail && Array.isArray(data.detail.issues)) {
+      msg += '\n' + data.detail.issues.map(i => '- ' + i).join('\n');
+    }
   }
   return msg;
 }
@@ -206,6 +252,30 @@ function renderResult(data, note) {
   const sec = document.getElementById('result');
   sec.hidden = false;
   sec.scrollIntoView({behavior: 'smooth'});
+  enableReorderPanel(data);
+}
+
+function enableReorderPanel(data) {
+  const panel = document.getElementById('reorderPanel');
+  const unavailable = document.getElementById('reorderUnavailable');
+  if (data.rules.length > MAX_REORDER_RULES) {
+    panel.hidden = false;
+    unavailable.hidden = false;
+    unavailable.textContent =
+      '该审计含 ' + data.rules.length + ' 条规则，超过重排序上限 ' +
+      MAX_REORDER_RULES + ' 条，不能发起重排序；审计冻结结论不受影响。';
+    document.getElementById('addConstraintBtn').disabled = true;
+    document.getElementById('submitReorderBtn').disabled = true;
+    return;
+  }
+  unavailable.hidden = true;
+  document.getElementById('addConstraintBtn').disabled = false;
+  document.getElementById('submitReorderBtn').disabled = false;
+  panel.hidden = false;
+  currentAudit = data;
+  document.getElementById('reorderAuditLabel').textContent = data.audit_id;
+  constraintRowsEl.innerHTML = '';
+  renumberConstraints();
 }
 
 async function submitAudit() {
@@ -260,6 +330,161 @@ document.getElementById('addBtn').addEventListener('click', () => addRow());
 document.getElementById('exampleBtn').addEventListener('click', fillExample);
 document.getElementById('submitBtn').addEventListener('click', submitAudit);
 document.getElementById('lookupBtn').addEventListener('click', lookupAudit);
+
+/* ------------------------- stable reordering ------------------------- */
+const MAX_REORDER_RULES = 12;
+const constraintRowsEl = document.getElementById('constraintRows');
+let currentAudit = null;   // frozen audit shown in the reorder panel
+
+function ruleOptions(selected) {
+  return currentAudit.rules.map((r, i) =>
+    '<option value="' + esc(r.id) + '"' + (r.id === selected ? ' selected' : '') + '>' +
+    esc(i + 1 + '. ' + r.id) + '</option>').join('');
+}
+
+function addConstraintRow(pair) {
+  const tr = document.createElement('tr');
+  const defaultBefore = pair ? pair.before : (currentAudit.rules[0] && currentAudit.rules[0].id);
+  const defaultAfter = pair ? pair.after : (currentAudit.rules[1] && currentAudit.rules[1].id) ||
+    (currentAudit.rules[0] && currentAudit.rules[0].id);
+  tr.innerHTML =
+    '<td class="idx mono"></td>' +
+    '<td><select class="before">' + ruleOptions(defaultBefore) + '</select></td>' +
+    '<td class="note">必须早于 →</td>' +
+    '<td><select class="after">' + ruleOptions(defaultAfter) + '</select></td>' +
+    '<td><button class="del" type="button" title="删除该约束">✕</button></td>';
+  tr.querySelector('.del').addEventListener('click', () => { tr.remove(); renumberConstraints(); });
+  constraintRowsEl.appendChild(tr);
+  renumberConstraints();
+}
+
+function renumberConstraints() {
+  [...constraintRowsEl.children].forEach((tr, i) => {
+    tr.querySelector('.idx').textContent = i + 1;
+  });
+  document.getElementById('constraintNote').textContent =
+    '已录入 ' + constraintRowsEl.children.length + ' 条优先约束';
+}
+
+function collectConstraints() {
+  return [...constraintRowsEl.children].map(tr => ({
+    before: tr.querySelector('.before').value,
+    after: tr.querySelector('.after').value,
+  }));
+}
+
+function renderReorderResult(data, note) {
+  document.getElementById('reorderResultId').textContent = '—— ' + data.reorder_id;
+  document.getElementById('reorderResultNote').textContent =
+    (note ? note + '　' : '') +
+    '来源审计 ' + data.audit_id + '；冻结时间：' + data.created_at;
+  const cv = document.getElementById('reorderConstraintsView');
+  if (data.constraints.length) {
+    cv.innerHTML = '<span class="note">优先约束：</span>' + data.constraints.map(c =>
+      '<span class="chip mono">' + esc(c.before) + ' → ' + esc(c.after) + '</span>').join('');
+  } else {
+    cv.innerHTML = '<span class="note">优先约束：无</span>';
+  }
+  const body = document.getElementById('reorderResultBody');
+  const r = data.result;
+  if (r.status === 'feasible') {
+    let html =
+      '<div style="margin-bottom:8px"><span class="tag feasible">存在可行顺序</span> ' +
+      '<span class="note">相对原顺序逆序对 ' + r.inversions + ' 个；完整顺序按规则标识序裁决。</span></div>' +
+      '<table><thead><tr><th>新位置</th><th>规则标识</th><th>原位置</th><th>该位置的最小报文见证（首配空间）</th></tr></thead><tbody>';
+    r.ordered_witnesses.forEach(w => {
+      html +=
+        '<tr><td class="mono">' + w.position + '</td>' +
+        '<td class="mono">' + esc(w.rule_id) + '</td>' +
+        '<td class="mono">' + w.original_position + '</td>' +
+        '<td class="mono">' + esc(w.witness.protocol) + '　' + esc(w.witness.src_ip) +
+        ' → ' + esc(w.witness.dst_ip) + '　源端口 ' + w.witness.src_port +
+        '　目的端口 ' + w.witness.dst_port + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    body.innerHTML = html;
+  } else {
+    let html =
+      '<div style="margin-bottom:8px"><span class="tag infeasible">不可行</span> ' +
+      '<span class="note">至多可排 ' + r.reachable_count + ' / ' + r.total_rules +
+      ' 条；下列规则无法在满足全部约束的前提下保有首先命中报文。</span></div>' +
+      '<div class="note">最大可达顺序：' +
+      (r.max_reachable_order.length ? r.max_reachable_order.map(id => '<span class="chip mono">' + esc(id) + '</span>').join('') : '（空）') +
+      '</div>' +
+      '<table style="margin-top:8px"><thead><tr><th>规则标识</th><th>阻碍类型</th><th>说明</th></tr></thead><tbody>';
+    r.blocked_rules.forEach(b => {
+      let extra = '';
+      if (b.reason === 'region_covered')
+        extra = '覆盖状态下已排规则：' + b.covered_in_state.map(id => '<span class="chip mono">' + esc(id) + '</span>').join('');
+      else if (b.reason === 'precedence_blocked')
+        extra = '必需前驱：' + b.required_predecessors.map(id => '<span class="chip mono">' + esc(id) + '</span>').join('');
+      html += '<tr><td class="mono">' + esc(b.rule_id) + '</td><td class="mono">' + esc(b.reason) +
+        '</td><td>' + esc(b.message) + (extra ? '<br>' + extra : '') + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    body.innerHTML = html;
+  }
+  const sec = document.getElementById('reorderResult');
+  sec.hidden = false;
+  sec.scrollIntoView({behavior: 'smooth'});
+}
+
+function total_total_rules_note(r) { return r.total_rules; }
+
+async function submitReorder() {
+  clearError();
+  if (!currentAudit) { showError('请先复查一个已冻结的审计。'); return; }
+  const reorderId = document.getElementById('reorderId').value.trim();
+  if (!reorderId) { showError('请填写重排序标识。'); return; }
+  const body = {
+    reorder_id: reorderId,
+    audit_id: currentAudit.audit_id,
+    constraints: collectConstraints(),
+  };
+  const pairKeys = new Set();
+  for (const c of body.constraints) {
+    if (c.before === c.after) { showError('存在规则必须早于自身的约束（' + c.before + '），请删除或修改。'); return; }
+    const key = c.before + ' ' + c.after;
+    if (pairKeys.has(key)) { showError('存在重复约束 ' + c.before + ' → ' + c.after + '。'); return; }
+    pairKeys.add(key);
+  }
+  const btn = document.getElementById('submitReorderBtn');
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/reorders', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { showError(formatError(resp.status, data)); return; }
+    renderReorderResult(data, resp.status === 200
+      ? '该重排序标识已存在且来源与约束一致，以下为既有冻结结论（幂等重放）。'
+      : '重排结论已冻结。');
+  } catch (e) {
+    showError('请求失败：' + e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function lookupReorder() {
+  clearError();
+  const id = document.getElementById('reorderLookupId').value.trim();
+  if (!id) { showError('请输入重排序标识。'); return; }
+  try {
+    const resp = await fetch('/api/reorders/' + encodeURIComponent(id));
+    const data = await resp.json();
+    if (!resp.ok) { showError(formatError(resp.status, data)); return; }
+    renderReorderResult(data, '以下为该重排序标识对应的冻结结论。');
+  } catch (e) {
+    showError('请求失败：' + e);
+  }
+}
+
+document.getElementById('addConstraintBtn').addEventListener('click', () => addConstraintRow());
+document.getElementById('submitReorderBtn').addEventListener('click', submitReorder);
+document.getElementById('reorderLookupBtn').addEventListener('click', lookupReorder);
 addRow();
 </script>
 </body>

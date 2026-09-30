@@ -13,7 +13,7 @@ from .region import (
 )
 
 
-def _witness(point: tuple[int, int, int, int, int]) -> dict:
+def witness_dict(point: tuple[int, int, int, int, int]) -> dict:
     proto, src, dst, sport, dport = point
     return {
         "protocol": PROTOCOL_NAMES[proto],
@@ -24,7 +24,7 @@ def _witness(point: tuple[int, int, int, int, int]) -> dict:
     }
 
 
-def _box_of(rule) -> tuple:
+def box_of(rule) -> tuple:
     return rule_box(
         rule.protocol,
         rule.src_cidr,
@@ -46,7 +46,7 @@ def analyze(rules) -> list[dict]:
     prior: list[tuple[str, tuple]] = []  # exact union of earlier rules
     verdicts: list[dict] = []
     for rule in rules:
-        box = _box_of(rule)
+        box = box_of(rule)
         remainder = [box]
         for _rule_id, prior_box in prior:
             if not remainder:
@@ -57,7 +57,7 @@ def analyze(rules) -> list[dict]:
                 {
                     "rule_id": rule.id,
                     "status": "hit",
-                    "witness": _witness(min_point(remainder)),
+                    "witness": witness_dict(min_point(remainder)),
                 }
             )
         else:
