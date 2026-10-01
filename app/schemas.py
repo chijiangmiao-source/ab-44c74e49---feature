@@ -9,7 +9,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 AUDIT_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
 RULE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+REORDER_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
 MAX_RULES = 18
+MAX_REORDER_RULES = 12
+MAX_CONSTRAINTS = 256
 PORT_MIN = 0
 PORT_MAX = 65535
 
@@ -70,3 +73,21 @@ class AuditRequest(BaseModel):
         if duplicates:
             raise ValueError(f"规则标识重复: {', '.join(duplicates)}")
         return self
+
+
+class Precedence(BaseModel):
+    """One ``before`` must appear earlier than ``after`` in the new order."""
+
+    before: str = Field(pattern=RULE_ID_PATTERN)
+    after: str = Field(pattern=RULE_ID_PATTERN)
+
+    @model_validator(mode="after")
+    def _no_self_loop(self) -> "Precedence":
+        if self.before == self.after:
+            raise ValueError(f"优先约束 {self.before!r} 必须早于自身，构成自环")
+        return self
+
+
+class ReorderRequest(BaseModel):
+    reorder_id: str = Field(pattern=REORDER_ID_PATTERN)
+    constraints: list[Precedence] = Field(default_factory=list, max_length=MAX_CONSTRAINTS)

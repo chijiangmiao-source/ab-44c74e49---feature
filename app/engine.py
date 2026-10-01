@@ -13,7 +13,8 @@ from .region import (
 )
 
 
-def _witness(point: tuple[int, int, int, int, int]) -> dict:
+def witness_dict(point: tuple[int, int, int, int, int]) -> dict:
+    """Serialize a lexicographically minimal 5-D point as a packet witness."""
     proto, src, dst, sport, dport = point
     return {
         "protocol": PROTOCOL_NAMES[proto],
@@ -57,7 +58,7 @@ def analyze(rules) -> list[dict]:
                 {
                     "rule_id": rule.id,
                     "status": "hit",
-                    "witness": _witness(min_point(remainder)),
+                    "witness": witness_dict(min_point(remainder)),
                 }
             )
         else:
